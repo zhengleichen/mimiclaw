@@ -2,6 +2,7 @@
 #include "tools/tool_web_search.h"
 #include "tools/tool_get_time.h"
 #include "tools/tool_files.h"
+#include "tools/tool_gpio.h"
 
 #include <string.h>
 #include "esp_log.h"
@@ -129,6 +130,24 @@ esp_err_t tool_registry_init(void)
         .execute = tool_list_dir_execute,
     };
     register_tool(&ld);
+
+    mimi_tool_t gpio = {
+        .name = "gpio",
+        .description = "Control GPIO pins. Supports configuring input/output, reading level, writing level, toggling, and pulsing a pin.",
+        .input_schema_json =
+            "{\"type\":\"object\","
+            "\"properties\":{"
+              "\"action\":{\"type\":\"string\",\"description\":\"One of: config_output, config_input, set_level, get_level, toggle, pulse\"},"
+              "\"pin\":{\"type\":\"integer\",\"description\":\"GPIO number\"},"
+              "\"level\":{\"type\":\"integer\",\"description\":\"0 or 1 (for set_level/pulse)\"},"
+              "\"initial_level\":{\"type\":\"integer\",\"description\":\"0 or 1 (for config_output)\"},"
+              "\"pull\":{\"type\":\"string\",\"description\":\"up, down, or none (for config_input)\"},"
+              "\"duration_ms\":{\"type\":\"integer\",\"description\":\"Pulse duration in ms (for pulse)\"}"
+            "},"
+            "\"required\":[\"action\",\"pin\"]}",
+        .execute = tool_gpio_execute,
+    };
+    register_tool(&gpio);
 
     build_tools_json();
 
