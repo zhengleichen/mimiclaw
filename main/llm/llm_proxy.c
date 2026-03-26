@@ -16,6 +16,67 @@ static const char *TAG = "llm";
 static char s_api_key[128] = {0};
 static char s_model[64] = MIMI_LLM_DEFAULT_MODEL;
 
+static bool llm_url_is_ark(void)
+{
+    return strstr(MIMI_LLM_API_URL, "volces.com") != NULL;
+}
+
+static bool llm_str_ends_with(const char *s, const char *suffix)
+{
+    if (!s || !suffix) return false;
+    size_t slen = strlen(s);
+    size_t suflen = strlen(suffix);
+    if (slen < suflen) return false;
+    return memcmp(s + (slen - suflen), suffix, suflen) == 0;
+}
+
+static bool llm_resolve_request_url(char *out, size_t out_size)
+{
+    const char *base = MIMI_LLM_API_URL;
+    if (!base || !out || out_size == 0) return false;
+
+    if (llm_url_is_ark()) {
+        if (strstr(base, "/v1/messages") != NULL) {
+            size_t n = strlen(base);
+            if (n >= out_size) return false;
+            memcpy(out, base, n + 1);
+            return true;
+        }
+
+        if (llm_str_ends_with(base, "/api/coding") || llm_str_ends_with(base, "/api/coding/")) {
+            int n = snprintf(out, out_size, "%s%sv1/messages", base,
+                             llm_str_ends_with(base, "/") ? "" : "/");
+            return n > 0 && (size_t)n < out_size;
+        }
+    }
+
+    size_t n = strlen(base);
+    if (n >= out_size) return false;
+    memcpy(out, base, n + 1);
+    return true;
+}
+
+static bool llm_parse_https_url(const char *url, char *host, size_t host_size, char *path, size_t path_size)
+{
+    if (!url || strncmp(url, "https://", 8) != 0) return false;
+
+    const char *p = url + 8;
+    const char *slash = strchr(p, '/');
+
+    size_t host_len = slash ? (size_t)(slash - p) : strlen(p);
+    if (host_len == 0 || host_len >= host_size) return false;
+    memcpy(host, p, host_len);
+    host[host_len] = '\0';
+
+    const char *path_src = slash ? slash : "/";
+    size_t path_len = strlen(path_src);
+    if (path_len == 0 || path_len >= path_size) return false;
+    memcpy(path, path_src, path_len);
+    path[path_len] = '\0';
+
+    return true;
+}
+
 /* ── Response buffer ──────────────────────────────────────────── */
 
 typedef struct {
@@ -95,6 +156,14 @@ esp_err_t llm_proxy_init(void)
         nvs_close(nvs);
     }
 
+    if (llm_url_is_ark()) {
+        if (s_model[0] == '\0' ||
+            strcmp(s_model, "anthropic") == 0 ||
+            strncmp(s_model, "claude-", 7) == 0) {
+            strncpy(s_model, "ark-code-latest", sizeof(s_model) - 1);
+        }
+    }
+
     if (s_api_key[0]) {
         ESP_LOGI(TAG, "LLM proxy initialized (model: %s)", s_model);
     } else {
@@ -107,8 +176,14 @@ esp_err_t llm_proxy_init(void)
 
 static esp_err_t llm_http_direct(const char *post_data, resp_buf_t *rb, int *out_status)
 {
+    char url[256];
+    if (!llm_resolve_request_url(url, sizeof(url))) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    ESP_LOGI(TAG, "LLM request URL: %s", url);
+
     esp_http_client_config_t config = {
-        .url = MIMI_LLM_API_URL,
+        .url = url,
         .event_handler = http_event_handler,
         .user_data = rb,
         .timeout_ms = 120 * 1000,
@@ -122,7 +197,13 @@ static esp_err_t llm_http_direct(const char *post_data, resp_buf_t *rb, int *out
 
     esp_http_client_set_method(client, HTTP_METHOD_POST);
     esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_header(client, "x-api-key", s_api_key);
+    if (llm_url_is_ark()) {
+        char auth[192];
+        snprintf(auth, sizeof(auth), "Bearer %s", s_api_key);
+        esp_http_client_set_header(client, "Authorization", auth);
+    } else {
+        esp_http_client_set_header(client, "x-api-key", s_api_key);
+    }
     esp_http_client_set_header(client, "anthropic-version", MIMI_LLM_API_VERSION);
     esp_http_client_set_post_field(client, post_data, strlen(post_data));
 
@@ -136,20 +217,50 @@ static esp_err_t llm_http_direct(const char *post_data, resp_buf_t *rb, int *out
 
 static esp_err_t llm_http_via_proxy(const char *post_data, resp_buf_t *rb, int *out_status)
 {
-    proxy_conn_t *conn = proxy_conn_open("api.anthropic.com", 443, 30000);
+    char url[256];
+    if (!llm_resolve_request_url(url, sizeof(url))) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    ESP_LOGI(TAG, "LLM request URL: %s", url);
+
+    char host[96];
+    char path[128];
+    if (!llm_parse_https_url(url, host, sizeof(host), path, sizeof(path))) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    proxy_conn_t *conn = proxy_conn_open(host, 443, 30000);
     if (!conn) return ESP_ERR_HTTP_CONNECT;
 
     int body_len = strlen(post_data);
-    char header[512];
-    int hlen = snprintf(header, sizeof(header),
-        "POST /v1/messages HTTP/1.1\r\n"
-        "Host: api.anthropic.com\r\n"
-        "Content-Type: application/json\r\n"
-        "x-api-key: %s\r\n"
-        "anthropic-version: %s\r\n"
-        "Content-Length: %d\r\n"
-        "Connection: close\r\n\r\n",
-        s_api_key, MIMI_LLM_API_VERSION, body_len);
+    char header[768];
+    int hlen = 0;
+    if (llm_url_is_ark()) {
+        hlen = snprintf(header, sizeof(header),
+            "POST %s HTTP/1.1\r\n"
+            "Host: %s\r\n"
+            "Content-Type: application/json\r\n"
+            "Authorization: Bearer %s\r\n"
+            "anthropic-version: %s\r\n"
+            "Content-Length: %d\r\n"
+            "Connection: close\r\n\r\n",
+            path, host, s_api_key, MIMI_LLM_API_VERSION, body_len);
+    } else {
+        hlen = snprintf(header, sizeof(header),
+            "POST %s HTTP/1.1\r\n"
+            "Host: %s\r\n"
+            "Content-Type: application/json\r\n"
+            "x-api-key: %s\r\n"
+            "anthropic-version: %s\r\n"
+            "Content-Length: %d\r\n"
+            "Connection: close\r\n\r\n",
+            path, host, s_api_key, MIMI_LLM_API_VERSION, body_len);
+    }
+
+    if (hlen <= 0 || hlen >= (int)sizeof(header)) {
+        proxy_conn_close(conn);
+        return ESP_ERR_INVALID_ARG;
+    }
 
     if (proxy_conn_write(conn, header, hlen) < 0 ||
         proxy_conn_write(conn, post_data, body_len) < 0) {
@@ -270,7 +381,8 @@ esp_err_t llm_chat(const char *system_prompt, const char *messages_json,
     free(post_data);
 
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "HTTP request failed: %s (status=%d resp=%.200s)",
+                 esp_err_to_name(err), status, rb.data ? rb.data : "");
         resp_buf_free(&rb);
         snprintf(response_buf, buf_size, "Error: HTTP request failed (%s)",
                  esp_err_to_name(err));
@@ -367,13 +479,15 @@ esp_err_t llm_chat_tools(const char *system_prompt,
     free(post_data);
 
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "HTTP request failed: %s (status=%d resp=%.200s)",
+                 esp_err_to_name(err), status, rb.data ? rb.data : "");
         resp_buf_free(&rb);
         return err;
     }
 
     if (status != 200) {
-        ESP_LOGE(TAG, "API error %d: %.500s", status, rb.data ? rb.data : "");
+        ESP_LOGE(TAG, "API error %d (len=%d): %.500s",
+                 status, (int)rb.len, rb.data ? rb.data : "");
         resp_buf_free(&rb);
         return ESP_FAIL;
     }

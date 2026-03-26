@@ -62,9 +62,9 @@
 #define MIMI_TIMEZONE                "PST8PDT,M3.2.0,M11.1.0"
 
 /* LLM */
-#define MIMI_LLM_DEFAULT_MODEL       "claude-opus-4-5"
+#define MIMI_LLM_DEFAULT_MODEL       "ark-code-latest"
 #define MIMI_LLM_MAX_TOKENS          4096
-#define MIMI_LLM_API_URL             "https://api.anthropic.com/v1/messages"
+#define MIMI_LLM_API_URL             "https://ark.cn-beijing.volces.com/api/coding"
 #define MIMI_LLM_API_VERSION         "2023-06-01"
 #define MIMI_LLM_STREAM_BUF_SIZE     (32 * 1024)
 
