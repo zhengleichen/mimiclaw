@@ -634,6 +634,7 @@ static void feishu_task(void *arg)
             .buffer_size = 4096,
             .task_stack = 6 * 1024,
             .pingpong_timeout_sec = 0, /* we handle ping ourselves */
+            .crt_bundle_attach = esp_crt_bundle_attach,
         };
 
         s_ws_client = esp_websocket_client_init(&ws_config);
